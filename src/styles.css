@@ -52,8 +52,80 @@ h1 {
   line-height: 1.5;
 }
 
+.weather {
+  margin-top: 40px;
+  border-top: 1px solid #cbd5e1;
+  padding-top: 20px;
+}
+
+.weather-location,
+.weather-note {
+  margin: 0;
+  color: #64748b;
+}
+
+.weather-location {
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+
+.weather-values {
+  display: flex;
+  gap: 40px;
+  margin: 16px 0;
+}
+
+.weather-values p {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+}
+
+.weather-values strong {
+  color: #123e35;
+  font-size: 2rem;
+  line-height: 1;
+}
+
+.weather-values span,
+.weather-note {
+  font-size: 0.875rem;
+}
+
+.weather-error {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+button {
+  flex: none;
+  border: 1px solid #123e35;
+  border-radius: 4px;
+  background: #123e35;
+  color: #ffffff;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.875rem;
+  font-weight: 700;
+  padding: 8px 12px;
+}
+
+button:hover {
+  background: #0d3029;
+}
+
 @media (max-width: 480px) {
   section {
     padding: 22px 24px;
+  }
+
+  .weather-values {
+    gap: 28px;
+  }
+
+  .weather-error {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
