@@ -2,80 +2,34 @@ import { StrictMode, useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import './styles.css'
 
-const heatGuidelines = {
-  2: [[89.8, 'black', 'Black flag', 'No outdoor practice. Delay, cancel, or move indoors.'], [87.7, 'red', 'Red flag', 'Maximum one hour of outdoor practice.'], [84.7, 'orange', 'Orange flag', 'Maximum two hours of outdoor practice.'], [79.7, 'yellow', 'Yellow flag', 'Modified practice and a rapid cooling zone are required.'], [-Infinity, 'green', 'Green flag', 'Normal practice may proceed with regular hydration breaks.']],
-  3: [[92.1, 'black', 'Black flag', 'No outdoor practice. Delay, cancel, or move indoors.'], [90.1, 'red', 'Red flag', 'Maximum one hour of outdoor practice.'], [87, 'orange', 'Orange flag', 'Maximum two hours of outdoor practice.'], [82, 'yellow', 'Yellow flag', 'Modified practice and a rapid cooling zone are required.'], [-Infinity, 'green', 'Green flag', 'Normal practice may proceed with regular hydration breaks.']],
+const limits = { 2: [[89.8, 'black', 'Black flag', 'No outdoor practice.'], [87.7, 'red', 'Red flag', 'Maximum one hour outdoors.'], [84.7, 'orange', 'Orange flag', 'Maximum two hours outdoors.'], [79.7, 'yellow', 'Yellow flag', 'Modified practice required.'], [-Infinity, 'green', 'Green flag', 'Normal practice may proceed.']], 3: [[92.1, 'black', 'Black flag', 'No outdoor practice.'], [90.1, 'red', 'Red flag', 'Maximum one hour outdoors.'], [87, 'orange', 'Orange flag', 'Maximum two hours outdoors.'], [82, 'yellow', 'Yellow flag', 'Modified practice required.'], [-Infinity, 'green', 'Green flag', 'Normal practice may proceed.']] }
+const position = () => new Promise((resolve, reject) => navigator.geolocation.getCurrentPosition(resolve, reject, { maximumAge: 900000, timeout: 10000 }))
+const f = (c) => c * 9 / 5 + 32
+const at = (series, now) => { const entry = series?.values?.find(({ validTime }) => { const [start, duration] = validTime.split('/'); const match = duration.match(/PT(?:(\d+)H)?(?:(\d+)M)?/); const end = new Date(start).getTime() + (Number(match?.[1] || 0) * 3600000) + (Number(match?.[2] || 0) * 60000); return new Date(start).getTime() <= now.getTime() && now.getTime() < end }) || series?.values?.[0]; return entry?.value }
+
+function solar(latitude, longitude, date, cloudCover) {
+  const day = Math.floor((Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()) - Date.UTC(date.getUTCFullYear(), 0, 0)) / 86400000)
+  const hour = date.getUTCHours() + date.getUTCMinutes() / 60
+  const gamma = 2 * Math.PI / 365 * (day - 1 + (hour - 12) / 24)
+  const declination = .006918 - .399912 * Math.cos(gamma) + .070257 * Math.sin(gamma) - .006758 * Math.cos(2 * gamma) + .000907 * Math.sin(2 * gamma) - .002697 * Math.cos(3 * gamma) + .00148 * Math.sin(3 * gamma)
+  const equation = 229.18 * (.000075 + .001868 * Math.cos(gamma) - .032077 * Math.sin(gamma) - .014615 * Math.cos(2 * gamma) - .040849 * Math.sin(2 * gamma))
+  const angle = ((date.getUTCHours() * 60 + date.getUTCMinutes() + equation + 4 * longitude) / 4 - 180) * Math.PI / 180
+  const cosine = Math.sin(latitude * Math.PI / 180) * Math.sin(declination) + Math.cos(latitude * Math.PI / 180) * Math.cos(declination) * Math.cos(angle)
+  if (cosine <= 0) return 0
+  const clear = 1361 * (1 + .033 * Math.cos(2 * Math.PI * day / 365)) * cosine * .75
+  return clear * (1 - .75 * Math.min(1, Math.max(0, cloudCover / 100)) ** 3.4)
 }
 
-const getPosition = () => new Promise((resolve, reject) => navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: false, maximumAge: 900000, timeout: 10000 }))
-const fahrenheit = (celsius) => Math.round((celsius * 9) / 5 + 32)
+function wetBulb(air, humidity) { return air * Math.atan(.151977 * Math.sqrt(humidity + 8.313659)) + Math.atan(air + humidity) - Math.atan(humidity - 1.676331) + .00391838 * humidity ** 1.5 * Math.atan(.023101 * humidity) - 4.686035 }
+function globe(air, irradiance, wind) { const airK = air + 273.15; const sigma = 5.670374419e-8; const convection = 5.7 + 3.8 * Math.sqrt(Math.max(wind, .1)); let globeK = airK; for (let i = 0; i < 20; i += 1) { const flux = .95 * irradiance + .95 * sigma * (airK ** 4 - globeK ** 4) + convection * (airK - globeK); globeK += flux / (4 * .95 * sigma * globeK ** 3 + convection) } return globeK - 273.15 }
+function wbgt({ temperature, humidity, wind, clouds, latitude, longitude, time }) { const irradiance = solar(latitude, longitude, time, clouds); const psychrometric = wetBulb(temperature, humidity); const natural = psychrometric + .001651 * irradiance - .09555 * wind + .13235 * (temperature - psychrometric) + .20249; return .7 * natural + .2 * globe(temperature, irradiance, wind) + .1 * temperature }
 
 function App() {
-  const [conditions, setConditions] = useState(null)
-  const [weatherStatus, setWeatherStatus] = useState('loading')
-  const [heatClass, setHeatClass] = useState('3')
-  const [wbgtInput, setWbgtInput] = useState('')
-
-  const loadConditions = async () => {
-    if (!navigator.geolocation) return setWeatherStatus('unsupported')
-    setWeatherStatus('loading')
-    try {
-      const { coords } = await getPosition()
-      const pointsResponse = await fetch(`https://api.weather.gov/points/${coords.latitude},${coords.longitude}`)
-      if (!pointsResponse.ok) throw new Error()
-      const points = await pointsResponse.json()
-      const stationsResponse = await fetch(points.properties.observationStations)
-      if (!stationsResponse.ok) throw new Error()
-      const stations = await stationsResponse.json()
-      const station = stations.features[0]?.properties.stationIdentifier
-      if (!station) throw new Error()
-      const observationResponse = await fetch(`https://api.weather.gov/stations/${station}/observations/latest`)
-      if (!observationResponse.ok) throw new Error()
-      const { properties } = await observationResponse.json()
-      if (properties.temperature.value === null || properties.relativeHumidity.value === null) throw new Error()
-      const location = points.properties.relativeLocation?.properties
-      setConditions({
-        humidity: Math.round(properties.relativeHumidity.value),
-        location: location ? `${location.city}, ${location.state}` : station,
-        station,
-        temperature: fahrenheit(properties.temperature.value),
-        updatedAt: new Date(properties.timestamp).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
-      })
-      setWeatherStatus('ready')
-    } catch (error) {
-      setWeatherStatus(error.code === error.PERMISSION_DENIED ? 'denied' : 'error')
-    }
-  }
-
-  useEffect(() => { loadConditions() }, [])
-
-  const wbgt = Number.parseFloat(wbgtInput)
-  const guideline = Number.isFinite(wbgt) ? heatGuidelines[heatClass].find(([minimum]) => wbgt >= minimum) : null
-
-  return <main><section aria-labelledby="page-title">
-    <p className="eyebrow">Texas marching band</p>
-    <h1 id="page-title">Practice heat check</h1>
-    <p className="message">Make the outdoor call with the right measurement.</p>
-
-    <div className="heat-check">
-      <div className="heat-check-header">
-        <p className="section-label">UIL practice status</p>
-        <label className="class-picker"><span>UIL class</span><select value={heatClass} onChange={(event) => setHeatClass(event.target.value)}><option value="3">Class 3</option><option value="2">Class 2</option></select></label>
-      </div>
-      <label className="wbgt-entry"><span>Official WBGT reading</span><div><input type="number" inputMode="decimal" min="0" max="120" step="0.1" value={wbgtInput} onChange={(event) => setWbgtInput(event.target.value)} placeholder="00.0" /><span>°F</span></div></label>
-      {guideline ? <div className={`flag-status ${guideline[1]}`} aria-live="polite"><p>{guideline[2]}</p><strong>{guideline[3]}</strong></div> : <p className="entry-prompt">Enter the reading from the school-approved WBGT source.</p>}
-      <p className="policy-note">Check within 15 minutes of practice and every 30 minutes during it. Follow the school’s written heat plan. <a href="https://wwwprod.uiltexas.org/health/info/heat-stress-and-athletic-participation">UIL guidance</a></p>
-    </div>
-
-    <div className="conditions" aria-live="polite">
-      <p className="section-label">Nearby conditions</p>
-      {weatherStatus === 'ready' && <><p className="conditions-location">Near {conditions.location}</p><div className="condition-values"><p><strong>{conditions.temperature}°F</strong><span>Temperature</span></p><p><strong>{conditions.humidity}%</strong><span>Humidity</span></p></div><p className="conditions-note">Station {conditions.station} · Updated {conditions.updatedAt}</p></>}
-      {weatherStatus === 'loading' && <p className="conditions-note">Finding nearby conditions...</p>}
-      {weatherStatus === 'denied' && <div className="conditions-error"><p className="conditions-note">Location permission is needed for nearby conditions.</p><button type="button" onClick={loadConditions}>Try again</button></div>}
-      {weatherStatus === 'unsupported' && <p className="conditions-note">This browser does not support location services.</p>}
-      {weatherStatus === 'error' && <div className="conditions-error"><p className="conditions-note">Current conditions are unavailable right now.</p><button type="button" onClick={loadConditions}>Retry</button></div>}
-    </div>
-  </section></main>
+  const [forecast, setForecast] = useState(null); const [status, setStatus] = useState('loading'); const [heatClass, setHeatClass] = useState('3')
+  const load = async () => { if (!navigator.geolocation) return setStatus('unsupported'); setStatus('loading'); try { const { coords } = await position(); const points = await (await fetch(`https://api.weather.gov/points/${coords.latitude},${coords.longitude}`)).json(); const gridResponse = await fetch(points.properties.forecastGridData); if (!gridResponse.ok) throw new Error(); const grid = (await gridResponse.json()).properties; const time = new Date(); const temperature = at(grid.temperature, time); const humidity = at(grid.relativeHumidity, time); const clouds = at(grid.skyCover, time); const rawWind = at(grid.windSpeed, time); if ([temperature, humidity, clouds, rawWind].some((value) => value == null)) throw new Error(); const wind = grid.windSpeed.uom.includes('km_h') ? rawWind / 3.6 : rawWind; const location = points.properties.relativeLocation?.properties; setForecast({ clouds: Math.round(clouds), humidity: Math.round(humidity), location: location ? `${location.city}, ${location.state}` : 'your location', temperature: Math.round(f(temperature)), time: time.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }), wbgt: f(wbgt({ temperature, humidity, wind, clouds, latitude: coords.latitude, longitude: coords.longitude, time })), wind: Math.round(wind * 2.237) }); setStatus('ready') } catch (error) { setStatus(error.code === error.PERMISSION_DENIED ? 'denied' : 'error') } }
+  useEffect(() => { load() }, [])
+  const rule = forecast && limits[heatClass].find(([minimum]) => forecast.wbgt >= minimum)
+  return <main><section aria-labelledby="page-title"><p className="eyebrow">Texas marching band</p><h1 id="page-title">Practice heat check</h1><p className="message">A forecast estimate for planning the next outdoor rehearsal.</p><div className="heat-check" aria-live="polite"><div className="heat-check-header"><p className="section-label">Forecast UIL status</p><label className="class-picker"><span>UIL class</span><select value={heatClass} onChange={(event) => setHeatClass(event.target.value)}><option value="3">Class 3</option><option value="2">Class 2</option></select></label></div>{status === 'ready' && <><p className="wbgt-value">{forecast.wbgt.toFixed(1)}<span>°F WBGT</span></p><div className={`flag-status ${rule[1]}`}><p>{rule[2]}</p><strong>{rule[3]}</strong></div><p className="policy-note">Forecast for {forecast.time}. Confirm with the school-approved WBGT source before practice.</p></>}{status === 'loading' && <p className="entry-prompt">Calculating your local forecast estimate...</p>}{status === 'denied' && <div className="conditions-error"><p className="entry-prompt">Location permission is needed to calculate a forecast.</p><button type="button" onClick={load}>Try again</button></div>}{status === 'unsupported' && <p className="entry-prompt">This browser does not support location services.</p>}{status === 'error' && <div className="conditions-error"><p className="entry-prompt">The forecast is unavailable right now.</p><button type="button" onClick={load}>Retry</button></div>}</div>{status === 'ready' && <div className="conditions"><p className="section-label">Forecast inputs</p><p className="conditions-location">Near {forecast.location} · {forecast.time}</p><div className="condition-values"><p><strong>{forecast.temperature}°F</strong><span>Temperature</span></p><p><strong>{forecast.humidity}%</strong><span>Humidity</span></p><p><strong>{forecast.wind} mph</strong><span>Wind</span></p><p><strong>{forecast.clouds}%</strong><span>Cloud cover</span></p></div><p className="conditions-note">Uses NWS forecast-grid data, solar position, and an NWS-style WBGT component calculation. <a href="https://wwwprod.uiltexas.org/health/info/heat-stress-and-athletic-participation">UIL guidance</a></p></div>}</section></main>
 }
 
 createRoot(document.getElementById('root')).render(<StrictMode><App /></StrictMode>)
